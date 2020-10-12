@@ -47,7 +47,7 @@ Editing:
 
 ## Editing (byte)
 
-- Space: Clear active numerical input
+- Any non-digit key: Reset any active numerical digits which have not yet been written.
 
 ## Search
 
