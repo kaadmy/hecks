@@ -371,6 +371,8 @@ class Editor:
                     match_first_index = i
 
                 match_bytes += 1
+            else:
+                match_bytes = 0
 
             if match_bytes >= len(bytes_):
                 match_bytes = 0
@@ -538,6 +540,7 @@ class Editor:
                     for r in self.search_results:
                         if byte_index >= r[0] and byte_index <= r[1]:
                             bytes_attr |= curses.color_pair(4)
+                            ascii_attr |= curses.color_pair(4)
                             break
 
                     if c == " " or not curses.ascii.isprint(c):
@@ -660,7 +663,10 @@ class Editor:
         if self.key == KEY_CTRL_B:
             self.pushFocus(EditorFocus.SELECT_NUMBER_BASE, "Select numerical base (B=binary, O=octal, D=decimal, H=hexidecimal): ")
         elif self.key == KEY_CTRL_S:
-            self.pushFocus(EditorFocus.SEARCH, f"Search for bytes ({self.number_base.name.capitalize()}): ")
+            if self.focus == EditorFocus.EDIT_ASCII:
+                self.pushFocus(EditorFocus.SEARCH, f"Search for string: ")
+            else:
+                self.pushFocus(EditorFocus.SEARCH, f"Search for bytes ({self.number_base.name.capitalize()}): ")
         elif self.key == KEY_CTRL_G:
             self.pushFocus(EditorFocus.GOTO_BYTE, f"Goto byte ({self.number_base.name.capitalize()}): ")
         elif self.key == KEY_CTRL_R:
@@ -771,54 +777,59 @@ class Editor:
         mode = NUMBER_BASES[self.number_base]
 
         reverse = False
-        do_search = False
 
-        if self.key_ch in mode["digits"]:
-            digits = 0
-            for i in range(len(self.text_entry) - mode["max_length"], len(self.text_entry)):
-                if i < 0 or self.text_entry[i] == " ":
-                    break
+        def doSearch(is_ascii):
+            bytes_ = []
 
-                digits += 1
+            if is_ascii:
+                bytes_ = [ord(c) for c in self.text_entry]
+            else:
+                bytes_ = [int(b, mode["base"]) for b in self.text_entry.split(" ") if b != ""]
+                for b in bytes_:
+                    if b > 255:
+                        self.textEntryNotify("Search term is invalid")
+                        return
 
-            if digits >= mode["max_length"]:
-                self.text_entry += " "
+            self.search(bytes_)
 
-            self.text_entry += self.key
+        if self.focus_stack[-2] == EditorFocus.EDIT_BYTES:
+            if self.key_ch in mode["digits"]:
+                digits = 0
+                for i in range(len(self.text_entry) - mode["max_length"], len(self.text_entry)):
+                    if i < 0 or self.text_entry[i] == " ":
+                        break
 
-            do_search = True
-        elif self.key == KEY_BACKSPACE:
-            if len(self.text_entry) > 0:
-                self.text_entry = self.text_entry[:-1]
-            if len(self.text_entry) > 0 and self.text_entry[-1] == " ":
-                self.text_entry = self.text_entry[:-1]
+                    digits += 1
 
-            do_search = True
-        elif self.key == " ":
-            if len(self.text_entry) > 0 and self.text_entry[-1] != " ":
-                self.text_entry += " "
-        elif self.key == KEY_CTRL_R:
+                if digits >= mode["max_length"]:
+                    self.text_entry += " "
+
+                self.text_entry += self.key
+
+                doSearch(False)
+            elif self.key == KEY_BACKSPACE:
+                if len(self.text_entry) > 0:
+                    self.text_entry = self.text_entry[:-1]
+                    if len(self.text_entry) > 0 and self.text_entry[-1] == " ":
+                        self.text_entry = self.text_entry[:-1]
+
+                doSearch(False)
+            elif self.key == " ":
+                if len(self.text_entry) > 0 and self.text_entry[-1] != " ":
+                    self.text_entry += " "
+        else:
+            if self.key_ord and curses.ascii.isprint(self.key_ord):
+                self.text_entry += self.key
+                doSearch(True)
+            elif self.key == KEY_BACKSPACE:
+                if len(self.text_entry) > 0:
+                    self.text_entry = self.text_entry[:-1]
+
+        if self.key == KEY_CTRL_R:
             reverse = True
         elif self.key == "\n":
             self.text_entry = ""
             self.popFocus()
-
-        # Attempt to find results with a given search term.
-        if do_search:
-            bytes_ = []
-            for b in self.text_entry.split(" "):
-                if len(b) < 1:
-                    continue
-
-                b = int(b, mode["base"])
-
-                if b > 255:
-                    self.textEntryNotify("Search term is invalid")
-                    return
-                else:
-                    bytes_.append(b)
-
-            self.search(bytes_)
 
         # Move cursor to next (or previous) search result.
         pos = self.getSearchResult(reverse=reverse)
