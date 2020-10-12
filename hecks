@@ -3,8 +3,9 @@
 import curses
 import curses.ascii
 from enum import auto, Enum
-import sys
 import os
+import struct
+import sys
 import traceback
 
 
@@ -65,6 +66,26 @@ class EditorFocus(Enum):
 
 # ========================================
 #
+# Miscellaneous keys.
+
+
+KEY_ESCAPE = "\x1b"
+KEY_CTRL_B = "\x02"
+KEY_CTRL_C = "\x03"
+KEY_CTRL_G = "\x07"
+KEY_CTRL_K = "\x0b"
+KEY_CTRL_Q = "\x11"
+KEY_CTRL_R = "\x12"
+KEY_CTRL_S = "\x13"
+KEY_CTRL_U = "\x15"
+KEY_CTRL_W = "\x17"
+KEY_BACKSPACE = "\x7f"
+KEY_DELETE = "KEY_DC"
+KEY_INSERT = "KEY_IC"
+
+
+# ========================================
+#
 # Editor.
 
 
@@ -118,10 +139,12 @@ class Editor:
         curses.init_pair(4, -1, curses.COLOR_YELLOW) # Search term.
 
         self.terminal_size = (1, 1)
+        self.terminal_min_size = [5, 80]
         self.terminal_too_small = True
 
         # Input state.
         self.key = ""
+        self.key_ch = ""
         self.key_ord = 0
 
         # Edit state.
@@ -172,13 +195,14 @@ class Editor:
         self.scr.keypad(False)
         curses.echo()
         curses.noraw()
+        curses.curs_set(1)
 
         curses.endwin()
 
     # File read/write.
     def readFile(self, force=False):
         if self.modified and not force:
-            self.pushFocus(EditorFocus.CONFIRM_READ_FILE, "Buffer has been modified, overwrite? (y=overwrite, press any other key to cancel): ")
+            self.pushFocus(EditorFocus.CONFIRM_READ_FILE, "Buffer has been modified, overwrite? (Y=overwrite): ")
             return
 
         if force or not self.modified:
@@ -195,28 +219,35 @@ class Editor:
         modified_externally = os.path.getmtime(self.path) > self.last_modification_time
 
         if modified_externally and not force:
-            self.pushFocus(EditorFocus.CONFIRM_WRITE_FILE, "File has been modified externally, overwrite? (y=overwrite, r=reload, press any other key to cancel): ")
+            self.pushFocus(EditorFocus.CONFIRM_WRITE_FILE, "File has been modified externally, overwrite? (Y=overwrite, R=reload): ")
             return
 
         if force or not modified_externally:
-            f = open(self.path, "wb")
-            f.write(bytes(self.bytes))
-            f.close()
+            if self.modified or force:
+                f = open(self.path, "wb")
+                f.write(bytes(self.bytes))
+                f.close()
+
+                self.textEntryNotify(f"Wrote file {self.path}")
+            else:
+                self.textEntryNotify(f"No changes need to be saved")
 
             self.modified = False
             self.last_modification_time = os.path.getmtime(self.path)
-
-            self.textEntryNotify(f"Wrote file {self.path}")
 
     # Terminal resize.
     def resize(self):
         self.terminal_size = self.scr.getmaxyx()
 
-        min_rows = 24
-        min_cols = 9 + (self.bytes_per_row * 4)
-        min_cols = 100
+        self.bytes_per_row = int((self.terminal_size[1] - 35) / 4)
+        self.bytes_per_row -= self.bytes_per_row % 16
+        self.bytes_per_row = max(self.bytes_per_row, 16)
 
-        self.terminal_too_small = self.terminal_size[0] < min_rows or self.terminal_size[1] < min_cols
+
+        self.terminal_min_size[1] = 10 + (self.bytes_per_row * 4)
+
+        self.terminal_too_small = self.terminal_size[0] < self.terminal_min_size[0] \
+            or self.terminal_size[1] < self.terminal_min_size[1]
 
         self.handleCursor()
 
@@ -229,6 +260,8 @@ class Editor:
         # Wait for key.
         self.key = self.scr.getkey()
 
+        self.key_ch = self.key.lower()
+
         self.key_ord = 0
         if len(self.key) == 1:
             self.key_ord = ord(self.key)
@@ -236,16 +269,17 @@ class Editor:
         self.textEntryNotify()
 
         # Global keys.
+        if self.key == "KEY_RESIZE":
+            self.resize()
+
         if self.focus != EditorFocus.EDIT_CAPTURE_KEY:
-            if self.key == "\x03": # ^C.
+            if self.key == KEY_CTRL_C and self.focus != EditorFocus.CONFIRM_EXIT:
                 if self.modified:
-                    self.pushFocus(EditorFocus.CONFIRM_EXIT, f"Save file {self.path}? (y=save and exit, n=exit without saving, press any other key to cancel): ")
+                    self.pushFocus(EditorFocus.CONFIRM_EXIT, f"Save file {self.path}? (Y=save and exit, ^C/N=exit without saving): ")
                 else:
                     self.is_alive = False
-            elif self.key == "\x1b":
+            elif self.key == KEY_ESCAPE:
                 raise EditorResetFocus
-            elif self.key == "KEY_RESIZE":
-                self.resize()
 
         self.focus_funcs[self.focus]()
 
@@ -346,7 +380,8 @@ class Editor:
     # Editing.
     def insertByte(self, b):
         if b < 0 or b > 255:
-            raise ValueError(f"{b} out of range 0,255")
+            self.textEntryNotify(f"Value {b} out of range 0, 255")
+            return
 
         if self.edit_byte_index < len(self.bytes):
             if self.edit_overwrite:
@@ -371,6 +406,17 @@ class Editor:
 
             self.modified = True
 
+    def getByte(self, index=None, offset=0):
+        if index == None:
+            index = self.edit_byte_index
+
+        index += offset
+
+        if index < 0 or index >= len(self.bytes):
+            return None
+
+        return self.bytes[index]
+
     # Search.
     def search(self, bytes_=[]):
         self.search_results = []
@@ -381,7 +427,7 @@ class Editor:
         match_bytes = 0
         match_first_index = 0
         for i in range(len(self.bytes)):
-            if self.bytes[i] == bytes_[match_bytes]:
+            if self.getByte(i) == bytes_[match_bytes]:
                 if match_bytes == 0:
                     match_first_index = i
 
@@ -439,8 +485,60 @@ class Editor:
 
         if self.text_prompt:
             self.scr.addstr(self.terminal_size[0] - 1, notify_len, self.text_prompt, curses.color_pair(3))
+            curses.curs_set(1)
+        else:
+            curses.curs_set(0)
         if self.text_entry:
             self.scr.addstr(self.terminal_size[0] - 1, notify_len + len(self.text_prompt), self.text_entry)
+
+    def drawByteInfo(self):
+        # Drawing info.
+        info_y = 2
+        info_x = 11 + (self.bytes_per_row * 4)
+
+        info_width = 20
+        info_height = 18
+
+        # Disable byte info if terminal is too small.
+        if self.terminal_size[0] <= (info_y + info_height + 2) \
+           or self.terminal_size[1] <= (info_x + info_width):
+            return
+
+        # Collect byte sequences.
+        bytes_ = bytes()
+        for i in range(8):
+            b = self.getByte(offset=i)
+            bytes_ += bytes([b if b != None else 0])
+
+        bytes_1 = bytes_[:1]
+        bytes_2 = bytes_[:2]
+        bytes_4 = bytes_[:4]
+        bytes_8 = bytes_[:8]
+
+        # Wipe screen region.
+        for y in range(info_y, info_y + info_height):
+            self.scr.addstr(y, info_x, " " * info_width)
+
+        # Currently selected endian.
+        endian = "<"
+
+        # Current byte.
+        u8 = struct.unpack("B", bytes_1)[0]
+        self.scr.addstr(info_y, info_x, "Byte:")
+        self.scr.addstr(info_y + 1, info_x + 2, f"0b{u8:08b}")
+        self.scr.addstr(info_y + 2, info_x + 2, f"0o{u8:03o}")
+        self.scr.addstr(info_y + 3, info_x + 2, f"0x{u8:02x}")
+
+        self.scr.addstr(info_y + 5, info_x, f"U8: {u8:d}")
+        self.scr.addstr(info_y + 6, info_x, f"S8 {struct.unpack('b', bytes_1)[0]:d}")
+        self.scr.addstr(info_y + 8, info_x, f"U16: {struct.unpack(endian + 'H', bytes_2)[0]:d}")
+        self.scr.addstr(info_y + 9, info_x, f"S16: {struct.unpack(endian + 'h', bytes_2)[0]:d}")
+        self.scr.addstr(info_y + 11, info_x, f"U32: {struct.unpack(endian + 'I', bytes_4)[0]:d}")
+        self.scr.addstr(info_y + 12, info_x, f"S32: {struct.unpack(endian + 'i', bytes_4)[0]:d}")
+        self.scr.addstr(info_y + 14, info_x, f"U64: {struct.unpack(endian + 'I', bytes_4)[0]:d}")
+        self.scr.addstr(info_y + 15, info_x, f"S64: {struct.unpack(endian + 'i', bytes_4)[0]:d}")
+        self.scr.addstr(info_y + 17, info_x, f"F32: {struct.unpack(endian + 'f', bytes_4)[0]:g}")
+        self.scr.addstr(info_y + 18, info_x, f"F64: {struct.unpack(endian + 'd', bytes_8)[0]:g}")
 
     def draw(self):
         if self.terminal_too_small:
@@ -458,16 +556,21 @@ class Editor:
         for col in range(self.bytes_per_row):
             is_selected = col == self.edit_cursor_col
 
-            self.scr.addstr(0, 8 + (col * 3), f"{col:1x} ", getAttr(is_selected, False))
-            self.scr.addstr(0, 8 + (self.bytes_per_row * 3) + col, f"{col:1x}", getAttr(is_selected, True))
+            a = self.edit_byte_index - (self.edit_byte_index % self.bytes_per_row) + col
+            a &= 0xff
+
+            self.scr.addstr(0, 9 + (col * 3), f"{a:02x}", getAttr(is_selected))
+
+        # Current address.
+        self.scr.addstr(0, 0, f"{self.edit_byte_index:08x}", curses.A_STANDOUT)
 
         # Address/byte separator.
-        self.scr.hline(1, 0, curses.ACS_HLINE, (8 + (self.bytes_per_row * 3) + self.bytes_per_row + 1), curses.color_pair(1))
+        self.scr.hline(1, 0, curses.ACS_HLINE, (9 + (self.bytes_per_row * 3) + self.bytes_per_row + 1), curses.color_pair(1))
 
         # Separator joins.
-        self.scr.addch(1, 7, curses.ACS_TTEE, curses.color_pair(1))
-        self.scr.addch(1, 7 + (self.bytes_per_row * 3), curses.ACS_TTEE, curses.color_pair(1))
-        self.scr.addch(1, 8 + (self.bytes_per_row * 4), curses.ACS_URCORNER, curses.color_pair(1))
+        self.scr.addch(1, 8, curses.ACS_TTEE, curses.color_pair(1))
+        self.scr.addch(1, 8 + (self.bytes_per_row * 3), curses.ACS_TTEE, curses.color_pair(1))
+        self.scr.addch(1, 9 + (self.bytes_per_row * 4), curses.ACS_URCORNER, curses.color_pair(1))
 
         # Draw rows.
         byte_index = self.scroll_offset * self.bytes_per_row
@@ -475,12 +578,12 @@ class Editor:
             byte_row = self.scroll_offset + row
 
             # Padding characters.
-            self.scr.addch(row + 2, 7, curses.ACS_VLINE, curses.color_pair(1))
-            self.scr.addch(row + 2, 7 + (self.bytes_per_row * 3), curses.ACS_VLINE, curses.color_pair(1))
-            self.scr.addch(row + 2, 8 + (self.bytes_per_row * 4), curses.ACS_VLINE, curses.color_pair(1))
+            self.scr.addch(row + 2, 8, curses.ACS_VLINE, curses.color_pair(1))
+            self.scr.addch(row + 2, 8 + (self.bytes_per_row * 3), curses.ACS_VLINE, curses.color_pair(1))
+            self.scr.addch(row + 2, 9 + (self.bytes_per_row * 4), curses.ACS_VLINE, curses.color_pair(1))
 
             # Address.
-            self.scr.addstr(row + 2, 0, f"{byte_row:07x}", getAttr(byte_row == self.edit_cursor_row))
+            self.scr.addstr(row + 2, 0, f"{byte_index:08x}", getAttr(byte_row == self.edit_cursor_row))
 
             # Bytes/ASCII.
             for col in range(self.bytes_per_row):
@@ -502,31 +605,32 @@ class Editor:
                         ascii_attr |= curses.color_pair(2)
                         c = "."
 
-                    self.scr.addstr(row + 2, 8 + (col * 3), f"{b:02x}", bytes_attr)
-                    self.scr.addstr(row + 2, 8 + (self.bytes_per_row * 3) + col, c, ascii_attr)
+                    self.scr.addstr(row + 2, 9 + (col * 3), f"{b:02x}", bytes_attr)
+                    self.scr.addstr(row + 2, 9 + (self.bytes_per_row * 3) + col, c, ascii_attr)
                 else:
-                    self.scr.addstr(row + 2, 8 + (col * 3), "  ", bytes_attr)
-                    self.scr.addstr(row + 2, 8 + (self.bytes_per_row * 3) + col, " ", ascii_attr)
+                    self.scr.addstr(row + 2, 9 + (col * 3), "  ", bytes_attr)
+                    self.scr.addstr(row + 2, 9 + (self.bytes_per_row * 3) + col, " ", ascii_attr)
 
                 byte_index += 1
 
         # Debug.
         #self.scr.addstr(0, 80, f"Pressed: '{self.key}' {self.key_ord} 0x{self.key_ord:x}                    ")
 
+        self.drawByteInfo()
         self.drawStatusline()
         self.drawTextEntry()
 
     def handleEditKeys(self):
         # Mode switching.
-        if self.key == "\x02": # ^B.
-            self.pushFocus(EditorFocus.SELECT_NUMBER_BASE, "Select numerical base (b=binary, o=octal, d=decimal, h=hexidecimal): ")
-        elif self.key == "\x13": # ^S.
+        if self.key == KEY_CTRL_B:
+            self.pushFocus(EditorFocus.SELECT_NUMBER_BASE, "Select numerical base (B=binary, O=octal, D=decimal, H=hexidecimal): ")
+        elif self.key == KEY_CTRL_S:
             self.pushFocus(EditorFocus.SEARCH, f"Search for bytes ({self.number_base.name.capitalize()}): ")
-        elif self.key == "\x07": # ^G.
+        elif self.key == KEY_CTRL_G:
             self.pushFocus(EditorFocus.GOTO_BYTE, f"Goto byte ({self.number_base.name.capitalize()}): ")
-        elif self.key == "\x12": # ^R.
+        elif self.key == KEY_CTRL_R:
             self.readFile()
-        elif self.key == "\x17": # ^W.
+        elif self.key == KEY_CTRL_W:
             self.writeFile()
 
             # Cursor.
@@ -545,6 +649,10 @@ class Editor:
         elif self.key == "KEY_NPAGE": # Pgdn.
             self.scroll_offset += self.terminal_size[0] - 4
             self.cursorIncrement(self.bytes_per_row * (self.terminal_size[0] - 4))
+        elif self.key == "KEY_HOME":
+            self.cursorJump(0)
+        elif self.key == "KEY_END":
+            self.cursorJump(len(self.bytes) - 1)
 
             # Editing modes.
         elif self.key == "\t": # Tab.
@@ -552,17 +660,17 @@ class Editor:
                 self.replaceFocus(EditorFocus.EDIT_BYTES)
             else:
                 self.replaceFocus(EditorFocus.EDIT_ASCII)
-        elif self.key == "KEY_IC": # Insert.
+        elif self.key == KEY_INSERT:
             self.edit_overwrite = not self.edit_overwrite
-        elif self.key == "\x11": # ^Q.
+        elif self.key == KEY_CTRL_Q:
             self.pushFocus(EditorFocus.EDIT_CAPTURE_KEY, "Press a key to capture: ")
 
             # Data modification.
-        elif self.key == "\x7f": # Backspace.
+        elif self.key == KEY_BACKSPACE:
             self.text_entry = ""
             self.cursorDecrement()
             self.deleteByte()
-        elif self.key == "KEY_DC": # Delete.
+        elif self.key == KEY_DELETE:
             self.text_entry = ""
             self.deleteByte()
 
@@ -578,7 +686,7 @@ class Editor:
 
         mode = NUMBER_BASES[self.number_base]
 
-        if self.key.lower() in mode["digits"]:
+        if self.key_ch in mode["digits"]:
             self.text_entry += self.key
         elif self.key == " ": # Space clears any digits currently being entered.
             self.text_entry = ""
@@ -604,14 +712,13 @@ class Editor:
         self.popFocus()
 
     def focusSelectNumberBase(self):
-        m = self.key.lower()
-        if m == "b":
+        if self.key_ch == "b":
             self.number_base = EditorNumberBase.BINARY
-        elif m == "o":
+        elif self.key_ch == "o":
             self.number_base = EditorNumberBase.OCTAL
-        elif m == "d":
+        elif self.key_ch == "d":
             self.number_base = EditorNumberBase.DECIMAL
-        elif m == "h":
+        elif self.key_ch == "h":
             self.number_base = EditorNumberBase.HEXIDECIMAL
         else:
             self.textEntryNotify("Unrecognized numerical base")
@@ -624,7 +731,7 @@ class Editor:
         reverse = False
         do_search = False
 
-        if self.key.lower() in mode["digits"]:
+        if self.key_ch in mode["digits"]:
             digits = 0
             for i in range(len(self.text_entry) - mode["max_length"], len(self.text_entry)):
                 if i < 0 or self.text_entry[i] == " ":
@@ -638,7 +745,7 @@ class Editor:
             self.text_entry += self.key
 
             do_search = True
-        elif self.key == "\x7f": # Backspace.
+        elif self.key == KEY_BACKSPACE:
             if len(self.text_entry) > 0:
                 self.text_entry = self.text_entry[:-1]
             if len(self.text_entry) > 0 and self.text_entry[-1] == " ":
@@ -648,7 +755,7 @@ class Editor:
         elif self.key == " ":
             if len(self.text_entry) > 0 and self.text_entry[-1] != " ":
                 self.text_entry += " "
-        elif self.key == "\x12": # ^R.
+        elif self.key == KEY_CTRL_R:
             reverse = True
         elif self.key == "\n":
             self.text_entry = ""
@@ -682,36 +789,33 @@ class Editor:
     def focusGotoByte(self):
         mode = NUMBER_BASES[self.number_base]
 
-        if self.key.lower() in mode["digits"]:
+        if self.key_ch in mode["digits"]:
             self.text_entry += self.key
-        elif self.key == "\x7f": # Backspace.
+        elif self.key == KEY_BACKSPACE:
             self.text_entry = self.text_entry[:-1]
         elif self.key == "\n":
             self.cursorJump(int(self.text_entry, mode["base"]))
             self.popFocus()
 
     def focusConfirmExit(self):
-        m = self.key.lower()
-        if m == "y":
+        if self.key_ch == "y":
             self.writeFile()
             self.is_alive = False
-        elif m == "n":
+        elif self.key_ch == "n" or self.key == KEY_CTRL_C:
             self.is_alive = False
         else:
             self.popFocus()
 
     def focusConfirmReadFile(self):
-        m = self.key.lower()
-        if m == "y":
+        if self.key_ch == "y":
             self.readFile(force=True)
 
         self.popFocus()
 
     def focusConfirmWriteFile(self):
-        m = self.key.lower()
-        if m == "y":
+        if self.key_ch == "y":
             self.writeFile(force=True)
-        elif m == "r":
+        elif self.key_ch == "r":
             self.readFile()
 
         self.popFocus()
@@ -740,7 +844,7 @@ if __name__ == "__main__":
         ed.main()
     except Exception as e:
         ed.deinit()
-        traceback.print_tb(e.__traceback__)
+        traceback.print_exc()
         exit(1)
 
     ed.deinit()
