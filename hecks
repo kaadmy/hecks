@@ -72,12 +72,14 @@ class EditorFocus(Enum):
 KEY_ESCAPE = "\x1b"
 KEY_CTRL_B = "\x02"
 KEY_CTRL_C = "\x03"
+KEY_CTRL_E = "\x05"
 KEY_CTRL_G = "\x07"
 KEY_CTRL_K = "\x0b"
 KEY_CTRL_L = "\x0c"
 KEY_CTRL_Q = "\x11"
 KEY_CTRL_R = "\x12"
 KEY_CTRL_S = "\x13"
+KEY_CTRL_T = "\x14"
 KEY_CTRL_U = "\x15"
 KEY_CTRL_W = "\x17"
 KEY_BACKSPACE = "\x7f"
@@ -134,10 +136,7 @@ class Editor:
         curses.start_color()
         curses.use_default_colors()
 
-        curses.init_pair(1, curses.COLOR_BLUE, -1) # Borders.
-        curses.init_pair(2, curses.COLOR_RED, -1) # Unprintable.
-        curses.init_pair(3, curses.COLOR_BLUE, -1) # Text entry.
-        curses.init_pair(4, -1, curses.COLOR_YELLOW) # Search term.
+        self.initColors()
 
         self.terminal_size = (1, 1)
         self.terminal_min_size = [5, 80]
@@ -239,7 +238,7 @@ class Editor:
             self.modified = False
             self.last_modification_time = os.path.getmtime(self.path)
 
-    # Terminal resize.
+    # Terminal handling.
     def resize(self):
         self.terminal_size = self.scr.getmaxyx()
 
@@ -256,6 +255,24 @@ class Editor:
         self.handleCursor()
 
         self.scr.clear()
+
+    def initColors(self):
+        curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE) # Borders.
+
+        curses.init_pair(2, curses.COLOR_BLACK + 8, -1) # Addresses.
+
+        curses.init_pair(4, curses.COLOR_BLUE, -1) # Text entry.
+
+        curses.init_pair(5, curses.COLOR_RED, -1) # Unprintable.
+        curses.init_pair(6, curses.COLOR_RED, curses.COLOR_YELLOW + 8) # Unprintable + Search term.
+        curses.init_pair(7, -1, curses.COLOR_YELLOW + 8) # Search term.
+
+        self.color_border = curses.color_pair(1)
+        self.color_address = curses.color_pair(2)
+        self.color_text_prompt = curses.color_pair(4)
+        self.color_unprintable = curses.color_pair(5)
+        self.color_unprintable_search = curses.color_pair(6)
+        self.color_search = curses.color_pair(7)
 
     # Text entry.
     def textEntryNotify(self, text=""):
@@ -401,7 +418,10 @@ class Editor:
             text += "*"
 
         # Numerical base.
-        text += f"  ({self.number_base.name.capitalize()})"
+        if self.last_edit_focus == EditorFocus.EDIT_ASCII:
+            text += f"  ({self.number_base.name.capitalize()}, ASCII)"
+        else:
+            text += f"  ({self.number_base.name.capitalize()})"
 
         # File size.
         text += f"  ({len(self.bytes):d} bytes)"
@@ -425,7 +445,7 @@ class Editor:
         self.scr.addstr(self.terminal_size[0] - 1, 0, self.text_notify)
 
         if self.text_prompt:
-            self.scr.addstr(self.terminal_size[0] - 1, notify_len, self.text_prompt, curses.color_pair(3))
+            self.scr.addstr(self.terminal_size[0] - 1, notify_len, self.text_prompt, self.color_text_prompt)
             curses.curs_set(1)
         else:
             curses.curs_set(0)
@@ -487,11 +507,11 @@ class Editor:
             self.scr.addstr(0, 0, "Terminal is too small")
             return
 
-        def getAttr(is_selected, is_ascii=None):
-            if is_ascii == None:
-                return curses.A_STANDOUT if is_selected else 0
-            else:
-                return curses.A_STANDOUT if is_selected and is_ascii == (self.last_edit_focus == EditorFocus.EDIT_ASCII) else 0
+        def getAttr(is_selected):
+            return curses.A_STANDOUT if is_selected else 0
+
+        # Address/byte separator.
+        self.scr.addstr(1, 0, "-" * self.terminal_size[1], curses.A_STANDOUT)
 
         # Draw address column header.
         for col in range(self.bytes_per_row):
@@ -500,18 +520,10 @@ class Editor:
             a = self.edit_byte_index - (self.edit_byte_index % self.bytes_per_row) + col
             a &= 0xff
 
-            self.scr.addstr(0, 9 + (col * 3), f"{a:02x}", getAttr(is_selected))
+            self.scr.addstr(0, 9 + (col * 3), f"{a:02x}", getAttr(is_selected) | 0 if is_selected else self.color_address)
 
         # Current address.
-        self.scr.addstr(0, 0, f"{self.edit_byte_index:08x}", curses.A_STANDOUT)
-
-        # Address/byte separator.
-        self.scr.hline(1, 0, "=", (9 + (self.bytes_per_row * 3) + self.bytes_per_row + 1), curses.color_pair(1))
-
-        # Separator joins.
-        self.scr.addch(1, 8, "+", curses.color_pair(1))
-        self.scr.addch(1, 8 + (self.bytes_per_row * 3), "+", curses.color_pair(1))
-        self.scr.addch(1, 9 + (self.bytes_per_row * 4), "+", curses.color_pair(1))
+        self.scr.addstr(0, 0, f"{self.edit_byte_index:08x}")
 
         # Draw rows.
         byte_index = self.scroll_offset * self.bytes_per_row
@@ -519,33 +531,52 @@ class Editor:
             byte_row = self.scroll_offset + row
 
             # Separators.
-            self.scr.addch(row + 2, 8, "|", curses.color_pair(1))
-            self.scr.addch(row + 2, 8 + (self.bytes_per_row * 3), "|", curses.color_pair(1))
-            self.scr.addch(row + 2, 9 + (self.bytes_per_row * 4), "|", curses.color_pair(1))
+            self.scr.addch(row + 2, 8 + (self.bytes_per_row * 3), "|", self.color_border)
+            if self.last_edit_focus == EditorFocus.EDIT_BYTES:
+                self.scr.addch(row + 2, 8, "|", self.color_border)
+                self.scr.addch(row + 2, 9 + (self.bytes_per_row * 4), "|")
+            else:
+                self.scr.addch(row + 2, 8, "|")
+                self.scr.addch(row + 2, 9 + (self.bytes_per_row * 4), "|", self.color_border)
 
             # Address.
-            self.scr.addstr(row + 2, 0, f"{byte_index:08x}", getAttr(byte_row == self.edit_cursor_row))
+            is_selected = byte_row == self.edit_cursor_row
+            self.scr.addstr(row + 2, 0, f"{byte_index:08x}", getAttr(is_selected) | 0 if is_selected else self.color_address)
 
             # Bytes/ASCII.
             for col in range(self.bytes_per_row):
                 is_selected = byte_index == self.edit_byte_index
 
-                bytes_attr = getAttr(is_selected, False)
-                ascii_attr = getAttr(is_selected, True)
+                bytes_attr = getAttr(is_selected)
+                ascii_attr = getAttr(is_selected)
 
                 if byte_index < len(self.bytes):
                     b = self.bytes[byte_index]
                     c = chr(b)
 
+                    is_search = False
+
+                    # FIXME: Binary search or something would probably
+                    # be a lot faster, since search results are sorted
+                    # by index and guarantee no overlaps.
                     for r in self.search_results:
                         if byte_index >= r[0] and byte_index <= r[1]:
-                            bytes_attr |= curses.color_pair(4)
-                            ascii_attr |= curses.color_pair(4)
+                            is_search = True
+                            bytes_attr |= self.color_search
                             break
 
                     if c == " " or not curses.ascii.isprint(c):
-                        ascii_attr |= curses.color_pair(2)
-                        c = "."
+                        if is_search:
+                            ascii_attr |= self.color_unprintable_search
+                        else:
+                            ascii_attr |= self.color_unprintable
+
+                        if b == 0:
+                            c = "%"
+                        else:
+                            c = "."
+                    elif is_search:
+                        ascii_attr |= self.color_search
 
                     self.scr.addstr(row + 2, 9 + (col * 3), f"{b:02x}", bytes_attr)
                     self.scr.addstr(row + 2, 9 + (self.bytes_per_row * 3) + col, c, ascii_attr)
@@ -559,7 +590,7 @@ class Editor:
         self.drawStatusline()
         self.drawTextEntry()
 
-        self.scr.addstr(0, 0, f"Pressed: '{self.key}' {self.key_ord} 0x{self.key_ord:x}                    ")
+        #self.scr.addstr(0, 0, f"Pressed: '{self.key}' {self.key_ord} 0x{self.key_ord:x}                    ")
 
     # Focus.
     def executeFocus(self):
@@ -664,7 +695,7 @@ class Editor:
             self.pushFocus(EditorFocus.SELECT_NUMBER_BASE, "Select numerical base (B=binary, O=octal, D=decimal, H=hexidecimal): ")
         elif self.key == KEY_CTRL_S:
             if self.focus == EditorFocus.EDIT_ASCII:
-                self.pushFocus(EditorFocus.SEARCH, f"Search for string: ")
+                self.pushFocus(EditorFocus.SEARCH, f"Search for ASCII: ")
             else:
                 self.pushFocus(EditorFocus.SEARCH, f"Search for bytes ({self.number_base.name.capitalize()}): ")
         elif self.key == KEY_CTRL_G:
