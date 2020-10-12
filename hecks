@@ -5,7 +5,7 @@ import curses.ascii
 from enum import auto, Enum
 import sys
 import os
-import shutil
+import traceback
 
 
 # ========================================
@@ -68,17 +68,17 @@ class EditorFocus(Enum):
 # Editor.
 
 
-class EditorResetFocus(BaseException):
+class EditorResetFocus(Exception):
 
     pass
 
 
-class EditorPopFocus(BaseException):
+class EditorPopFocus(Exception):
 
     pass
 
 
-class EditorReplaceFocus(BaseException):
+class EditorReplaceFocus(Exception):
 
     pass
 
@@ -115,6 +115,7 @@ class Editor:
         curses.init_pair(1, curses.COLOR_BLUE, -1) # Borders.
         curses.init_pair(2, curses.COLOR_RED, -1) # Unprintable.
         curses.init_pair(3, curses.COLOR_BLUE, -1) # Text entry.
+        curses.init_pair(4, -1, curses.COLOR_YELLOW) # Search term.
 
         self.terminal_size = (1, 1)
         self.terminal_too_small = True
@@ -122,8 +123,6 @@ class Editor:
         # Input state.
         self.key = ""
         self.key_ord = 0
-
-        self.last_key = ""
 
         # Edit state.
         self.scroll_offset = 0
@@ -146,17 +145,25 @@ class Editor:
             EditorFocus.EDIT_ASCII: self.focusEditAscii,
             EditorFocus.EDIT_CAPTURE_KEY: self.focusEditCaptureKey,
             EditorFocus.SELECT_NUMBER_BASE: self.focusSelectNumberBase,
-            #EditorFocus.SEARCH: self.focusSearch,
+            EditorFocus.SEARCH: self.focusSearch,
             EditorFocus.GOTO_BYTE: self.focusGotoByte,
             EditorFocus.CONFIRM_EXIT: self.focusConfirmExit,
             EditorFocus.CONFIRM_READ_FILE: self.focusConfirmReadFile,
             EditorFocus.CONFIRM_WRITE_FILE: self.focusConfirmWriteFile,
         }
 
+        # EditorFocus.EDIT_BYTES or EditorFocus.EDIT_ASCII
+        self.last_edit_focus = None
+
         # Text entry.
         self.text_prompt = ""
         self.text_entry = ""
         self.text_notify = ""
+
+        # Search.
+
+        # [[byte_index_first, byte_index_last]]
+        self.search_results = []
 
         # Inital refresh.
         self.resize()
@@ -220,7 +227,6 @@ class Editor:
         self.draw()
 
         # Wait for key.
-        self.last_key = self.key
         self.key = self.scr.getkey()
 
         self.key_ord = 0
@@ -236,21 +242,25 @@ class Editor:
                     self.pushFocus(EditorFocus.CONFIRM_EXIT, f"Save file {self.path}? (y=save and exit, n=exit without saving, press any other key to cancel): ")
                 else:
                     self.is_alive = False
-            elif self.key == "KEY_RESIZE":
-                self.resize()
             elif self.key == "\x1b":
                 raise EditorResetFocus
+            elif self.key == "KEY_RESIZE":
+                self.resize()
 
         self.focus_funcs[self.focus]()
 
     def pushFocus(self, focus, prompt=""):
         self.focus_stack.append(focus)
-        self.focus = self.focus_stack[-1]
+        self.focus = focus
+        if focus == EditorFocus.EDIT_BYTES or focus == EditorFocus.EDIT_ASCII:
+            self.last_edit_focus = focus
 
         self.text_prompt = prompt
         self.text_entry = ""
 
         self.textEntryNotify()
+
+        self.search()
 
         while self.is_alive:
             try:
@@ -264,25 +274,30 @@ class Editor:
             except EditorReplaceFocus:
                 pass
 
-    def popFocus(self, break_out=True):
+    def popFocus(self):
         if len(self.focus_stack) > 0:
             self.focus_stack.pop()
 
         if len(self.focus_stack) > 0:
             self.focus = self.focus_stack[-1]
+            if self.focus == EditorFocus.EDIT_BYTES or self.focus == EditorFocus.EDIT_ASCII:
+                self.last_edit_focus = self.focus
         else:
             self.focus = None
 
         self.text_prompt = ""
         self.text_entry = ""
 
-        if break_out:
-            raise EditorPopFocus
+        self.search()
+
+        raise EditorPopFocus
 
     def replaceFocus(self, focus, prompt=""):
         if len(self.focus_stack) > 0:
             self.focus_stack[-1] = focus
             self.focus = focus
+            if focus == EditorFocus.EDIT_BYTES or focus == EditorFocus.EDIT_ASCII:
+                self.last_edit_focus = focus
 
         self.text_prompt = ""
         self.text_entry = ""
@@ -356,6 +371,40 @@ class Editor:
 
             self.modified = True
 
+    # Search.
+    def search(self, bytes_=[]):
+        self.search_results = []
+
+        if len(bytes_) < 1:
+            return
+
+        match_bytes = 0
+        match_first_index = 0
+        for i in range(len(self.bytes)):
+            if self.bytes[i] == bytes_[match_bytes]:
+                if match_bytes == 0:
+                    match_first_index = i
+
+                match_bytes += 1
+
+            if match_bytes >= len(bytes_):
+                match_bytes = 0
+
+                self.search_results.append([match_first_index, i])
+
+    def getSearchResult(self, reverse=False):
+        if reverse:
+            for r in reversed(self.search_results):
+                if r[0] < self.edit_byte_index:
+                    return r[0]
+        else:
+            for r in self.search_results:
+                if r[1] > self.edit_byte_index:
+                    return r[1]
+
+        return None
+
+    # Drawing.
     def drawStatusline(self):
         text = " "
 
@@ -364,11 +413,8 @@ class Editor:
         if self.modified:
             text += "*"
 
-        # Insert mode.
-        if self.focus == EditorFocus.EDIT_ASCII:
-            text += f"  (ASCII)"
-        else:
-            text += f"  ({self.number_base.name.capitalize()})"
+        # Numerical base.
+        text += f"  ({self.number_base.name.capitalize()})"
 
         # File size.
         text += f"  (Size 0x{len(self.bytes):x})"
@@ -396,7 +442,6 @@ class Editor:
         if self.text_entry:
             self.scr.addstr(self.terminal_size[0] - 1, notify_len + len(self.text_prompt), self.text_entry)
 
-    # Drawing.
     def draw(self):
         if self.terminal_too_small:
             self.scr.clear()
@@ -407,7 +452,7 @@ class Editor:
             if is_ascii == None:
                 return curses.A_STANDOUT if is_selected else 0
             else:
-                return curses.A_STANDOUT if is_selected and is_ascii == (self.focus == EditorFocus.EDIT_ASCII) else 0
+                return curses.A_STANDOUT if is_selected and is_ascii == (self.last_edit_focus == EditorFocus.EDIT_ASCII) else 0
 
         # Draw address column header.
         for col in range(self.bytes_per_row):
@@ -448,6 +493,11 @@ class Editor:
                     b = self.bytes[byte_index]
                     c = chr(b)
 
+                    for r in self.search_results:
+                        if byte_index >= r[0] and byte_index <= r[1]:
+                            bytes_attr |= curses.color_pair(4)
+                            break
+
                     if c == " " or not curses.ascii.isprint(c):
                         ascii_attr |= curses.color_pair(2)
                         c = "."
@@ -460,56 +510,71 @@ class Editor:
 
                 byte_index += 1
 
-        self.drawStatusline()
-        self.drawTextEntry()
-
         # Debug.
         #self.scr.addstr(0, 80, f"Pressed: '{self.key}' {self.key_ord} 0x{self.key_ord:x}                    ")
 
+        self.drawStatusline()
+        self.drawTextEntry()
+
     def handleEditKeys(self):
-        if self.focus == EditorFocus.EDIT_BYTES or self.focus == EditorFocus.EDIT_ASCII:
-            # Global edit keys (byte or ASCII editing.)
-            if self.key == "KEY_UP":
-                if self.edit_byte_index >= self.bytes_per_row:
-                    self.cursorDecrement(self.bytes_per_row)
-            elif self.key == "KEY_DOWN":
-                self.cursorIncrement(self.bytes_per_row)
-            elif self.key == "KEY_LEFT":
-                self.cursorDecrement()
-            elif self.key == "KEY_RIGHT":
-                self.cursorIncrement()
-            elif self.key == "KEY_PPAGE": # Pgup.
-                self.scroll_offset -= self.terminal_size[0] - 4
-                self.cursorDecrement(self.bytes_per_row * (self.terminal_size[0] - 4))
-            elif self.key == "KEY_NPAGE": # Pgdn.
-                self.scroll_offset += self.terminal_size[0] - 4
-                self.cursorIncrement(self.bytes_per_row * (self.terminal_size[0] - 4))
-            elif self.key == "KEY_IC": # Insert.
-                self.edit_overwrite = not self.edit_overwrite
-            elif self.key == "\t": # Tab.
-                if self.focus == EditorFocus.EDIT_ASCII:
-                    self.replaceFocus(EditorFocus.EDIT_BYTES)
-                else:
-                    self.replaceFocus(EditorFocus.EDIT_ASCII)
-            elif self.key == "\x02": # ^B.
-                self.pushFocus(EditorFocus.SELECT_NUMBER_BASE, "Select numerical base (b=binary, o=octal, d=decimal, h=hexidecimal): ")
-            elif self.key == "\x12": # ^R.
-                self.readFile()
-            elif self.key == "\x17": # ^W.
-                self.writeFile()
-            elif self.key == "\x07": # ^G.
-                self.pushFocus(EditorFocus.GOTO_BYTE, f"Goto byte ({self.number_base.name.capitalize()}): ")
-            elif self.key == "\x7f": # Backspace.
-                self.text_entry = ""
-                self.cursorDecrement()
-                self.deleteByte()
-            elif self.key == "KEY_DC": # Delete.
-                self.text_entry = ""
-                self.deleteByte()
+        # Mode switching.
+        if self.key == "\x02": # ^B.
+            self.pushFocus(EditorFocus.SELECT_NUMBER_BASE, "Select numerical base (b=binary, o=octal, d=decimal, h=hexidecimal): ")
+        elif self.key == "\x13": # ^S.
+            self.pushFocus(EditorFocus.SEARCH, f"Search for bytes ({self.number_base.name.capitalize()}): ")
+        elif self.key == "\x07": # ^G.
+            self.pushFocus(EditorFocus.GOTO_BYTE, f"Goto byte ({self.number_base.name.capitalize()}): ")
+        elif self.key == "\x12": # ^R.
+            self.readFile()
+        elif self.key == "\x17": # ^W.
+            self.writeFile()
+
+            # Cursor.
+        elif self.key == "KEY_UP":
+            if self.edit_byte_index >= self.bytes_per_row:
+                self.cursorDecrement(self.bytes_per_row)
+        elif self.key == "KEY_DOWN":
+            self.cursorIncrement(self.bytes_per_row)
+        elif self.key == "KEY_LEFT":
+            self.cursorDecrement()
+        elif self.key == "KEY_RIGHT":
+            self.cursorIncrement()
+        elif self.key == "KEY_PPAGE": # Pgup.
+            self.scroll_offset -= self.terminal_size[0] - 4
+            self.cursorDecrement(self.bytes_per_row * (self.terminal_size[0] - 4))
+        elif self.key == "KEY_NPAGE": # Pgdn.
+            self.scroll_offset += self.terminal_size[0] - 4
+            self.cursorIncrement(self.bytes_per_row * (self.terminal_size[0] - 4))
+
+            # Editing modes.
+        elif self.key == "\t": # Tab.
+            if self.focus == EditorFocus.EDIT_ASCII:
+                self.replaceFocus(EditorFocus.EDIT_BYTES)
+            else:
+                self.replaceFocus(EditorFocus.EDIT_ASCII)
+        elif self.key == "KEY_IC": # Insert.
+            self.edit_overwrite = not self.edit_overwrite
+        elif self.key == "\x11": # ^Q.
+            self.pushFocus(EditorFocus.EDIT_CAPTURE_KEY, "Press a key to capture: ")
+
+            # Data modification.
+        elif self.key == "\x7f": # Backspace.
+            self.text_entry = ""
+            self.cursorDecrement()
+            self.deleteByte()
+        elif self.key == "KEY_DC": # Delete.
+            self.text_entry = ""
+            self.deleteByte()
+
+        else:
+            return False
+
+        return True
 
     # Focus states.
     def focusEditBytes(self):
-        self.handleEditKeys()
+        if self.handleEditKeys():
+            return
 
         mode = NUMBER_BASES[self.number_base]
 
@@ -518,16 +583,16 @@ class Editor:
         elif self.key == " ": # Space clears any digits currently being entered.
             self.text_entry = ""
 
+        # Finalize numerical byte entry.
         if (self.key == "\n" and len(self.text_entry) > 0) or len(self.text_entry) >= mode["max_length"]:
             self.insertByte(int(self.text_entry, mode["base"]))
             self.text_entry = ""
 
     def focusEditAscii(self):
-        self.handleEditKeys()
+        if self.handleEditKeys():
+            return
 
-        if self.key == "\x11": # ^Q.
-            self.pushFocus(EditorFocus.EDIT_CAPTURE_KEY)
-        elif self.key_ord and curses.ascii.isprint(self.key_ord):
+        if self.key_ord and curses.ascii.isprint(self.key_ord):
             self.insertByte(self.key_ord)
 
     def focusEditCaptureKey(self):
@@ -553,8 +618,70 @@ class Editor:
 
         self.popFocus()
 
+    def focusSearch(self):
+        mode = NUMBER_BASES[self.number_base]
+
+        reverse = False
+        do_search = False
+
+        if self.key.lower() in mode["digits"]:
+            digits = 0
+            for i in range(len(self.text_entry) - mode["max_length"], len(self.text_entry)):
+                if i < 0 or self.text_entry[i] == " ":
+                    break
+
+                digits += 1
+
+            if digits >= mode["max_length"]:
+                self.text_entry += " "
+
+            self.text_entry += self.key
+
+            do_search = True
+        elif self.key == "\x7f": # Backspace.
+            if len(self.text_entry) > 0:
+                self.text_entry = self.text_entry[:-1]
+            if len(self.text_entry) > 0 and self.text_entry[-1] == " ":
+                self.text_entry = self.text_entry[:-1]
+
+            do_search = True
+        elif self.key == " ":
+            if len(self.text_entry) > 0 and self.text_entry[-1] != " ":
+                self.text_entry += " "
+        elif self.key == "\x12": # ^R.
+            reverse = True
+        elif self.key == "\n":
+            self.text_entry = ""
+            self.popFocus()
+
+        # Attempt to find results with a given search term.
+        if do_search:
+            bytes_ = []
+            for b in self.text_entry.split(" "):
+                if len(b) < 1:
+                    continue
+
+                b = int(b, mode["base"])
+
+                if b > 255:
+                    self.textEntryNotify("Search term is invalid")
+                    return
+                else:
+                    bytes_.append(b)
+
+            self.search(bytes_)
+
+        # Move cursor to next (or previous) search result.
+        pos = self.getSearchResult(reverse=reverse)
+        if pos == None:
+            self.textEntryNotify("No matches")
+        else:
+            self.textEntryNotify()
+            self.cursorJump(pos)
+
     def focusGotoByte(self):
         mode = NUMBER_BASES[self.number_base]
+
         if self.key.lower() in mode["digits"]:
             self.text_entry += self.key
         elif self.key == "\x7f": # Backspace.
@@ -602,5 +729,12 @@ if __name__ == "__main__":
         exit(0)
 
     ed = Editor(sys.argv[1])
-    ed.main()
+
+    try:
+        ed.main()
+    except Exception as e:
+        ed.deinit()
+        traceback.print_tb(e.__traceback__)
+        exit(1)
+
     ed.deinit()
