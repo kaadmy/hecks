@@ -9,6 +9,7 @@
 
 - Escape: Cancel any active prompts and go back to edit mode.
 - Ctrl-C: Quit.
+- Ctrl-L: Refresh screen.
 
 ## Editing (byte and ASCII)
 
@@ -20,6 +21,7 @@
 
 - Up/down/left/right: Move cursor.
 - Pgup/pgdn: Previous/next page.
+- Ctrl-L: Scroll cursor to center/top/bottom.
 
 - Tab: Toggle between byte and ASCII editing.
 - Insert: Toggle overwrite mode.
@@ -27,6 +29,7 @@
 
 - Backspace: Delete (or zero) the byte before the cursor and move the cursor left.
 - Delete: Delete (or zero) the byte under the cursor.
+- Ctrl-K: Delete from cursor to end of file.
 
 ## Editing (byte)
 

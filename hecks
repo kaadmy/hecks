@@ -74,6 +74,7 @@ KEY_CTRL_B = "\x02"
 KEY_CTRL_C = "\x03"
 KEY_CTRL_G = "\x07"
 KEY_CTRL_K = "\x0b"
+KEY_CTRL_L = "\x0c"
 KEY_CTRL_Q = "\x11"
 KEY_CTRL_R = "\x12"
 KEY_CTRL_S = "\x13"
@@ -149,6 +150,9 @@ class Editor:
 
         # Edit state.
         self.scroll_offset = 0
+
+        # 0=center, 1=top, 2=bottom
+        self.scroll_cursor_align = 0
 
         self.edit_cursor_row = 0
         self.edit_cursor_col = 0
@@ -253,117 +257,46 @@ class Editor:
 
         self.scr.clear()
 
-    # Focus.
-    def executeFocus(self):
-        self.draw()
-
-        # Wait for key.
-        self.key = self.scr.getkey()
-
-        self.key_ch = self.key.lower()
-
-        self.key_ord = 0
-        if len(self.key) == 1:
-            self.key_ord = ord(self.key)
-
-        self.textEntryNotify()
-
-        # Global keys.
-        if self.key == "KEY_RESIZE":
-            self.resize()
-
-        if self.focus != EditorFocus.EDIT_CAPTURE_KEY:
-            if self.key == KEY_CTRL_C and self.focus != EditorFocus.CONFIRM_EXIT:
-                if self.modified:
-                    self.pushFocus(EditorFocus.CONFIRM_EXIT, f"Save file {self.path}? (Y=save and exit, ^C/N=exit without saving): ")
-                else:
-                    self.is_alive = False
-            elif self.key == KEY_ESCAPE:
-                raise EditorResetFocus
-
-        self.focus_funcs[self.focus]()
-
-    def pushFocus(self, focus, prompt=""):
-        self.focus_stack.append(focus)
-        self.focus = focus
-        if focus == EditorFocus.EDIT_BYTES or focus == EditorFocus.EDIT_ASCII:
-            self.last_edit_focus = focus
-
-        self.text_prompt = prompt
-        self.text_entry = ""
-
-        self.textEntryNotify()
-
-        self.search()
-
-        while self.is_alive:
-            try:
-                # It's possible for the focus to change while still in
-                # this loop!
-                #
-                # Be cautious of this when modifying this code.
-                self.executeFocus()
-            except EditorPopFocus:
-                break
-            except EditorReplaceFocus:
-                pass
-
-    def popFocus(self):
-        if len(self.focus_stack) > 0:
-            self.focus_stack.pop()
-
-        if len(self.focus_stack) > 0:
-            self.focus = self.focus_stack[-1]
-            if self.focus == EditorFocus.EDIT_BYTES or self.focus == EditorFocus.EDIT_ASCII:
-                self.last_edit_focus = self.focus
-        else:
-            self.focus = None
-
-        self.text_prompt = ""
-        self.text_entry = ""
-
-        self.search()
-
-        raise EditorPopFocus
-
-    def replaceFocus(self, focus, prompt=""):
-        if len(self.focus_stack) > 0:
-            self.focus_stack[-1] = focus
-            self.focus = focus
-            if focus == EditorFocus.EDIT_BYTES or focus == EditorFocus.EDIT_ASCII:
-                self.last_edit_focus = focus
-
-        self.text_prompt = ""
-        self.text_entry = ""
-
-        self.textEntryNotify()
-
-        raise EditorReplaceFocus
-
     # Text entry.
     def textEntryNotify(self, text=""):
         self.text_notify = text
 
     # Change scroll offset to stay onscreen, as well as preventing
     # underflow of certain values.q
-    def handleCursor(self):
+    def handleCursor(self, align=None):
+        # Prevent negative scroll or cursor position.
         if self.edit_byte_index < 0:
             self.edit_byte_index = 0
 
         if self.scroll_offset < 0:
             self.scroll_offset = 0
 
+        # Update cursor row/column.
         self.edit_cursor_row = int(self.edit_byte_index / self.bytes_per_row)
         self.edit_cursor_col = self.edit_byte_index % self.bytes_per_row
 
+        region_height = self.terminal_size[0] - 5
+
         # This is relative to the byte entry region.
         dist_top = self.edit_cursor_row - self.scroll_offset
-        dist_bottom  = dist_top - (self.terminal_size[0] - 5)
+        dist_bottom  = dist_top - region_height
 
-        if dist_top < 0:
+        # Handle cursor alignment.
+        if align == 0:
+            self.scroll_offset += dist_top - (region_height // 2)
+        elif align == 1:
             self.scroll_offset += dist_top
-        elif dist_bottom > 0:
+        elif align == 2:
             self.scroll_offset += dist_bottom
+        else:
+            # Just try to keep cursor on screen.
+            if dist_top < 0:
+                self.scroll_offset += dist_top
+            elif dist_bottom > 0:
+                self.scroll_offset += dist_bottom
+
+        if self.scroll_offset < 0:
+            self.scroll_offset = 0
 
     def cursorIncrement(self, number=1):
         self.edit_byte_index += number
@@ -403,6 +336,12 @@ class Editor:
                 self.bytes[self.edit_byte_index] = 0
             else:
                 del self.bytes[self.edit_byte_index]
+
+            self.modified = True
+
+    def deleteToEnd(self):
+        if self.edit_byte_index < len(self.bytes):
+            self.bytes[self.edit_byte_index:] = []
 
             self.modified = True
 
@@ -463,7 +402,7 @@ class Editor:
         text += f"  ({self.number_base.name.capitalize()})"
 
         # File size.
-        text += f"  (Size 0x{len(self.bytes):x})"
+        text += f"  ({len(self.bytes):d} bytes)"
 
         # Overwrite mode.
         if self.edit_overwrite:
@@ -497,7 +436,7 @@ class Editor:
         info_x = 11 + (self.bytes_per_row * 4)
 
         info_width = 20
-        info_height = 18
+        info_height = 19
 
         # Disable byte info if terminal is too small.
         if self.terminal_size[0] <= (info_y + info_height + 2) \
@@ -565,22 +504,22 @@ class Editor:
         self.scr.addstr(0, 0, f"{self.edit_byte_index:08x}", curses.A_STANDOUT)
 
         # Address/byte separator.
-        self.scr.hline(1, 0, curses.ACS_HLINE, (9 + (self.bytes_per_row * 3) + self.bytes_per_row + 1), curses.color_pair(1))
+        self.scr.hline(1, 0, "=", (9 + (self.bytes_per_row * 3) + self.bytes_per_row + 1), curses.color_pair(1))
 
         # Separator joins.
-        self.scr.addch(1, 8, curses.ACS_TTEE, curses.color_pair(1))
-        self.scr.addch(1, 8 + (self.bytes_per_row * 3), curses.ACS_TTEE, curses.color_pair(1))
-        self.scr.addch(1, 9 + (self.bytes_per_row * 4), curses.ACS_URCORNER, curses.color_pair(1))
+        self.scr.addch(1, 8, "+", curses.color_pair(1))
+        self.scr.addch(1, 8 + (self.bytes_per_row * 3), "+", curses.color_pair(1))
+        self.scr.addch(1, 9 + (self.bytes_per_row * 4), "+", curses.color_pair(1))
 
         # Draw rows.
         byte_index = self.scroll_offset * self.bytes_per_row
         for row in range(self.terminal_size[0] - 4):
             byte_row = self.scroll_offset + row
 
-            # Padding characters.
-            self.scr.addch(row + 2, 8, curses.ACS_VLINE, curses.color_pair(1))
-            self.scr.addch(row + 2, 8 + (self.bytes_per_row * 3), curses.ACS_VLINE, curses.color_pair(1))
-            self.scr.addch(row + 2, 9 + (self.bytes_per_row * 4), curses.ACS_VLINE, curses.color_pair(1))
+            # Separators.
+            self.scr.addch(row + 2, 8, "|", curses.color_pair(1))
+            self.scr.addch(row + 2, 8 + (self.bytes_per_row * 3), "|", curses.color_pair(1))
+            self.scr.addch(row + 2, 9 + (self.bytes_per_row * 4), "|", curses.color_pair(1))
 
             # Address.
             self.scr.addstr(row + 2, 0, f"{byte_index:08x}", getAttr(byte_row == self.edit_cursor_row))
@@ -613,13 +552,109 @@ class Editor:
 
                 byte_index += 1
 
-        # Debug.
-        #self.scr.addstr(0, 80, f"Pressed: '{self.key}' {self.key_ord} 0x{self.key_ord:x}                    ")
-
         self.drawByteInfo()
         self.drawStatusline()
         self.drawTextEntry()
 
+        self.scr.addstr(0, 0, f"Pressed: '{self.key}' {self.key_ord} 0x{self.key_ord:x}                    ")
+
+    # Focus.
+    def executeFocus(self):
+        self.draw()
+
+        # Wait for key.
+        self.key = self.scr.getkey()
+
+        self.key_ch = self.key.lower()
+
+        self.key_ord = 0
+        if len(self.key) == 1:
+            self.key_ord = ord(self.key)
+
+        self.textEntryNotify()
+
+        # Global keys.
+        if self.key == "KEY_RESIZE":
+            self.resize()
+
+        # Any key which is *not* Ctrl-L will reset scroll alignment,
+        # so the next Ctrl-L will center the cursor (instead of just
+        # being whatever alignment the last Ctrl-L left it in.)
+        if self.key != KEY_CTRL_L:
+            self.scroll_cursor_align = 0
+
+        if self.focus != EditorFocus.EDIT_CAPTURE_KEY:
+            if self.key == KEY_ESCAPE:
+                raise EditorResetFocus
+            elif self.key == KEY_CTRL_C and self.focus != EditorFocus.CONFIRM_EXIT:
+                if self.modified:
+                    self.pushFocus(EditorFocus.CONFIRM_EXIT, f"Save file {self.path}? (Y=save and exit, Ctrl-C/N=exit without saving): ")
+                else:
+                    self.is_alive = False
+            elif self.key == KEY_CTRL_L:
+                self.resize()
+                self.draw()
+
+        self.focus_funcs[self.focus]()
+
+    def pushFocus(self, focus, prompt=""):
+        self.focus_stack.append(focus)
+        self.focus = focus
+        if focus == EditorFocus.EDIT_BYTES or focus == EditorFocus.EDIT_ASCII:
+            self.last_edit_focus = focus
+
+        self.text_prompt = prompt
+        self.text_entry = ""
+
+        self.textEntryNotify()
+
+        self.search()
+
+        while self.is_alive:
+            try:
+                # It's possible for the focus to change while still in
+                # this loop!
+                #
+                # Be cautious of this when modifying this code.
+                self.executeFocus()
+            except EditorPopFocus:
+                break
+            except EditorReplaceFocus:
+                pass
+
+    def popFocus(self):
+        if len(self.focus_stack) > 0:
+            self.focus_stack.pop()
+
+        if len(self.focus_stack) > 0:
+            self.focus = self.focus_stack[-1]
+            if self.focus == EditorFocus.EDIT_BYTES or self.focus == EditorFocus.EDIT_ASCII:
+                self.last_edit_focus = self.focus
+        else:
+            self.focus = None
+
+        self.text_prompt = ""
+        self.text_entry = ""
+
+        self.search()
+
+        raise EditorPopFocus
+
+    def replaceFocus(self, focus, prompt=""):
+        if len(self.focus_stack) > 0:
+            self.focus_stack[-1] = focus
+            self.focus = focus
+            if focus == EditorFocus.EDIT_BYTES or focus == EditorFocus.EDIT_ASCII:
+                self.last_edit_focus = focus
+
+        self.text_prompt = ""
+        self.text_entry = ""
+
+        self.textEntryNotify()
+
+        raise EditorReplaceFocus
+
+    # Input helpers.
     def handleEditKeys(self):
         # Mode switching.
         if self.key == KEY_CTRL_B:
@@ -652,7 +687,12 @@ class Editor:
         elif self.key == "KEY_HOME":
             self.cursorJump(0)
         elif self.key == "KEY_END":
-            self.cursorJump(len(self.bytes) - 1)
+            self.cursorJump(len(self.bytes))
+        elif self.key == KEY_CTRL_L:
+            self.handleCursor(align=self.scroll_cursor_align)
+            self.scroll_cursor_align += 1
+            if self.scroll_cursor_align > 2:
+                self.scroll_cursor_align = 0
 
             # Editing modes.
         elif self.key == "\t": # Tab.
@@ -667,16 +707,18 @@ class Editor:
 
             # Data modification.
         elif self.key == KEY_BACKSPACE:
-            self.text_entry = ""
             self.cursorDecrement()
             self.deleteByte()
         elif self.key == KEY_DELETE:
-            self.text_entry = ""
             self.deleteByte()
+        elif self.key == KEY_CTRL_K:
+            self.deleteToEnd()
 
         else:
             return False
 
+        # Any key handled here will clear the current text entry.
+        self.text_entry = ""
         return True
 
     # Focus states.
@@ -700,7 +742,7 @@ class Editor:
         if self.handleEditKeys():
             return
 
-        if self.key_ord and curses.ascii.isprint(self.key_ord):
+        if self.key_ord and (curses.ascii.isprint(self.key_ord) or self.key == "\n"):
             self.insertByte(self.key_ord)
 
     def focusEditCaptureKey(self):
