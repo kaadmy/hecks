@@ -1,6 +1,8 @@
 
 > An easy to use terminal-based hex editor written in Python.
 
+***
+
 **Warning!** This software is very much experimental and still has issues, use at your own risk.
 
 # Usage
@@ -61,3 +63,7 @@ Editing:
 - Large files (30MB+) get pretty slow (just blame Python.)
 - No undo/redo.
 - No structure decoding.
+
+# License
+
+See file _LICENSE.txt_ for more information.
