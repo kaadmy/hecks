@@ -1,7 +1,7 @@
 
-> Hecks
-
 > An easy to use terminal-based hex editor written in Python.
+
+**Warning!** This software is very much experimental and still has issues, use at your own risk.
 
 # Usage
 
@@ -15,6 +15,7 @@
 
 Actions:
 
+- Ctrl-E: Change endian.
 - Ctrl-B: Change numerical base.
 - Ctrl-S: Search.
 - Ctrl-G: Goto byte.
@@ -54,3 +55,9 @@ Editing:
 - Ctrl-S: Find next match.
 - Ctrl-R: Find previous match.
 - Enter: Exit search mode.
+
+# Known bugs/missing features
+
+- Large files (30MB+) get pretty slow (just blame Python.)
+- No undo/redo.
+- No structure decoding.

@@ -11,7 +11,14 @@ import traceback
 
 # ========================================
 #
-# Number base.
+# Numerical/endian state.
+
+
+class EditorNumberEndian(Enum):
+
+    NATIVE = "="
+    LITTLE = "<"
+    BIG = ">"
 
 
 class EditorNumberBase(Enum):
@@ -56,6 +63,7 @@ class EditorFocus(Enum):
     EDIT_BYTES = auto()
     EDIT_ASCII = auto()
     EDIT_CAPTURE_KEY = auto()
+    SELECT_NUMBER_ENDIAN = auto()
     SELECT_NUMBER_BASE = auto()
     SEARCH = auto()
     GOTO_BYTE = auto()
@@ -160,6 +168,7 @@ class Editor:
         self.edit_overwrite = True
 
         # Byte editing.
+        self.number_endian = EditorNumberEndian.NATIVE
         self.number_base = EditorNumberBase.HEXIDECIMAL
 
         # Interface focus.
@@ -170,6 +179,7 @@ class Editor:
             EditorFocus.EDIT_BYTES: self.focusEditBytes,
             EditorFocus.EDIT_ASCII: self.focusEditAscii,
             EditorFocus.EDIT_CAPTURE_KEY: self.focusEditCaptureKey,
+            EditorFocus.SELECT_NUMBER_ENDIAN: self.focusSelectNumberEndian,
             EditorFocus.SELECT_NUMBER_BASE: self.focusSelectNumberBase,
             EditorFocus.SEARCH: self.focusSearch,
             EditorFocus.GOTO_BYTE: self.focusGotoByte,
@@ -418,10 +428,17 @@ class Editor:
             text += "*"
 
         # Numerical base.
+        text += f"  ({self.number_base.name.capitalize()}, "
+        if self.number_endian == EditorNumberEndian.NATIVE:
+            text += "NE"
+        elif self.number_endian == EditorNumberEndian.LITTLE:
+            text += "LE"
+        elif self.number_endian == EditorNumberEndian.BIG:
+            text += "BE"
         if self.last_edit_focus == EditorFocus.EDIT_ASCII:
-            text += f"  ({self.number_base.name.capitalize()}, ASCII)"
+            text += f", ASCII)"
         else:
-            text += f"  ({self.number_base.name.capitalize()})"
+            text += ")"
 
         # File size.
         text += f"  ({len(self.bytes):d} bytes)"
@@ -480,9 +497,6 @@ class Editor:
         for y in range(info_y, info_y + info_height):
             self.scr.addstr(y, info_x, " " * info_width)
 
-        # Currently selected endian.
-        endian = "<"
-
         # Current byte.
         u8 = struct.unpack("B", bytes_1)[0]
         self.scr.addstr(info_y, info_x, "Byte:")
@@ -492,14 +506,14 @@ class Editor:
 
         self.scr.addstr(info_y + 5, info_x, f"U8: {u8:d}")
         self.scr.addstr(info_y + 6, info_x, f"S8 {struct.unpack('b', bytes_1)[0]:d}")
-        self.scr.addstr(info_y + 8, info_x, f"U16: {struct.unpack(endian + 'H', bytes_2)[0]:d}")
-        self.scr.addstr(info_y + 9, info_x, f"S16: {struct.unpack(endian + 'h', bytes_2)[0]:d}")
-        self.scr.addstr(info_y + 11, info_x, f"U32: {struct.unpack(endian + 'I', bytes_4)[0]:d}")
-        self.scr.addstr(info_y + 12, info_x, f"S32: {struct.unpack(endian + 'i', bytes_4)[0]:d}")
-        self.scr.addstr(info_y + 14, info_x, f"U64: {struct.unpack(endian + 'I', bytes_4)[0]:d}")
-        self.scr.addstr(info_y + 15, info_x, f"S64: {struct.unpack(endian + 'i', bytes_4)[0]:d}")
-        self.scr.addstr(info_y + 17, info_x, f"F32: {struct.unpack(endian + 'f', bytes_4)[0]:g}")
-        self.scr.addstr(info_y + 18, info_x, f"F64: {struct.unpack(endian + 'd', bytes_8)[0]:g}")
+        self.scr.addstr(info_y + 8, info_x, f"U16: {struct.unpack(self.number_endian.value + 'H', bytes_2)[0]:d}")
+        self.scr.addstr(info_y + 9, info_x, f"S16: {struct.unpack(self.number_endian.value + 'h', bytes_2)[0]:d}")
+        self.scr.addstr(info_y + 11, info_x, f"U32: {struct.unpack(self.number_endian.value + 'I', bytes_4)[0]:d}")
+        self.scr.addstr(info_y + 12, info_x, f"S32: {struct.unpack(self.number_endian.value + 'i', bytes_4)[0]:d}")
+        self.scr.addstr(info_y + 14, info_x, f"U64: {struct.unpack(self.number_endian.value + 'I', bytes_4)[0]:d}")
+        self.scr.addstr(info_y + 15, info_x, f"S64: {struct.unpack(self.number_endian.value + 'i', bytes_4)[0]:d}")
+        self.scr.addstr(info_y + 17, info_x, f"F32: {struct.unpack(self.number_endian.value + 'f', bytes_4)[0]:g}")
+        self.scr.addstr(info_y + 18, info_x, f"F64: {struct.unpack(self.number_endian.value + 'd', bytes_8)[0]:g}")
 
     def draw(self):
         if self.terminal_too_small:
@@ -691,7 +705,9 @@ class Editor:
     # Input helpers.
     def handleEditKeys(self):
         # Mode switching.
-        if self.key == KEY_CTRL_B:
+        if self.key == KEY_CTRL_E:
+            self.pushFocus(EditorFocus.SELECT_NUMBER_ENDIAN, "Select endian (N=native, L=little, B=big): ")
+        elif self.key == KEY_CTRL_B:
             self.pushFocus(EditorFocus.SELECT_NUMBER_BASE, "Select numerical base (B=binary, O=octal, D=decimal, H=hexidecimal): ")
         elif self.key == KEY_CTRL_S:
             if self.focus == EditorFocus.EDIT_ASCII:
@@ -787,6 +803,18 @@ class Editor:
             self.insertByte(self.key_ord)
         else:
             self.textEntryNotify("Captured key was unrecognized")
+
+        self.popFocus()
+
+    def focusSelectNumberEndian(self):
+        if self.key_ch == "n":
+            self.number_endian = EditorNumberEndian.NATIVE
+        elif self.key_ch == "l":
+            self.number_endian = EditorNumberEndian.LITTLE
+        elif self.key_ch == "b":
+            self.number_endian = EditorNumberEndian.BIG
+        else:
+            self.textEntryNotify("Unrecognized endian")
 
         self.popFocus()
 
