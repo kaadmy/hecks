@@ -39,6 +39,8 @@ Mode switching:
 - Tab: Toggle between byte and ASCII editing.
 - Insert: Toggle overwrite mode.
 - Ctrl-Q: Capture next key press and insert as character.
+- Ctrl-M: Modify current byte.
+- Ctrl-N: Modify current byte in binary mode.
 
 ***
 
