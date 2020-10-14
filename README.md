@@ -3,7 +3,7 @@
 
 ***
 
-**Warning!** This software is very much experimental and still has issues, use at your own risk.
+**Warning!** This software is very much experimental and still has issues; use at your own risk.
 
 # Usage
 
